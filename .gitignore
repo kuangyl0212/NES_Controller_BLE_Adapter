@@ -1,0 +1,46 @@
+# Arduino
+*.ino.hex
+*.elf
+*.eep
+*.lst
+*.map
+
+# Build output
+build/
+*.o
+*.a
+*.lib
+*.d
+
+# PlatformIO
+.pio/
+.vscode/.browse.c_cpp_db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Libraries (if using PlatformIO lib folder)
+lib/
