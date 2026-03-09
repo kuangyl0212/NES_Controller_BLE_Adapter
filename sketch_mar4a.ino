@@ -1,6 +1,6 @@
 /*
  * NES Controller Bluetooth Gamepad - Xbox XInput 模式
- * 最终版本 - 兼容 QuickNES 核心
+ * Beta 版本 - 方向键抗干扰优化
  * 增加 ESP32 深度睡眠支持
  */
 
@@ -60,6 +60,11 @@ unsigned long lastSendTime = 0;
 
 // 自动休眠状态
 unsigned long lastActivityTime = 0;
+
+// 方向键保护机制 - 防止 Turbo 干扰导致方向键误释放
+#define DIRECTION_RELEASE_THRESHOLD 2  // 需要连续检测到释放才接受
+uint8_t directionReleaseCounter = 0;
+uint8_t lastDirection = 0;  // 记录上一次的方向键状态
 
 // RTC 内存 - 保存唤醒原因
 RTC_DATA_ATTR bool wokeFromSleep = false;
@@ -146,6 +151,32 @@ void loop() {
   }
   
   uint8_t result = readNESMajority();
+  
+  // 应用方向键保护机制 - 只延迟释放，不延迟按下
+  uint8_t direction = result & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
+  uint8_t nonDirection = result & ~(BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
+  
+  if (direction != 0) {
+    // 有方向键按下，立即重置计数器并更新方向
+    directionReleaseCounter = 0;
+    lastDirection = direction;
+  } else if (lastDirection != 0) {
+    // 方向键看似释放，需要连续检测到才接受
+    directionReleaseCounter++;
+    if (directionReleaseCounter >= DIRECTION_RELEASE_THRESHOLD) {
+      // 真正释放
+      lastDirection = 0;
+      directionReleaseCounter = 0;
+    }
+    // 否则保持上一次的方向
+    direction = lastDirection;
+  } else {
+    // 本来就是释放状态
+    direction = 0;
+  }
+  
+  // 合并方向键和非方向键
+  result = nonDirection | direction;
   
   // 更新最后活动时间
   if (result != 0) {
