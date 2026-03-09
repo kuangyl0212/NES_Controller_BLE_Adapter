@@ -1,198 +1,225 @@
 # NES Controller Bluetooth Adapter
 
-## 项目概述
+[中文文档](README_zh_CN.md)
 
-本项目是一个基于 **ESP32** 的 **NES（任天堂红白机）控制器转蓝牙 HID 游戏手柄适配器**。它允许将经典的 NES 控制器连接到现代设备（PC、手机等），通过蓝牙 HID 协议模拟为 Xbox 手柄设备。
+## Overview
 
-### 主要功能
+This project is an **ESP32-based NES (Nintendo Entertainment System) controller to Bluetooth HID gamepad adapter**. It allows you to connect classic NES controllers to modern devices (PC, smartphone, etc.) via Bluetooth HID protocol, emulating an Xbox gamepad device.
 
-- **NES 控制器输入读取**：通过标准 NES 控制器协议读取 8 个按钮状态
-- **蓝牙 HID Xbox 手柄输出**：模拟标准 Xbox 游戏手柄，支持 D-Pad 方向键和多个按钮
-- **信号滤波**：采用多数投票算法，消除按钮抖动，提高稳定性
-- **LED 状态指示**：显示连接状态和按钮按下状态
+### Key Features
+
+- **NES Controller Input Reading**: Reads 8 button states via standard NES controller protocol
+- **Bluetooth HID Xbox Output**: Emulates a standard Xbox gamepad with D-Pad and multiple buttons
+- **Signal Filtering**: Uses majority voting algorithm to eliminate button bounce and improve stability
+- **LED Status Indicator**: Shows connection status and button press states
+- **Auto Sleep Mode**: Automatically enters deep sleep after 5 minutes of inactivity to save power (press any button to wake up)
 
 ---
 
-## 硬件规格
+## Hardware Specifications
 
-### 开发板
+### Development Board
 
-- **ESP32**（支持蓝牙 BLE HID 的开发板）
+- **ESP32** (development board with Bluetooth BLE HID support)
 
-### 引脚定义
+### Pin Definitions
 
-| 引脚 | 功能 | 说明 |
-|------|------|------|
-| D2 | NES_CLOCK | NES 控制器时钟信号 |
-| D4 | NES_LATCH | NES 控制器锁存信号 |
-| D5 | NES_DATA | NES 控制器数据输入 |
-| D2 | LED_PIN | 状态指示 LED |
+| Pin | Function | Description |
+|-----|----------|-------------|
+| D2 | NES_CLOCK | NES controller clock signal |
+| D4 | NES_LATCH | NES controller latch signal |
+| D5 | NES_DATA | NES controller data input |
+| D2 | LED_PIN | Status indicator LED |
 
-### NES 控制器接口
+### NES Controller Interface
 
 ```
-NES Controller (公头)
+NES Controller (Male Connector)
 ┌─────────────┐
 │ 1 - GND     │─────── GND
 │ 2 - CLOCK   │─────── D2 (NES_CLOCK)
 │ 3 - LATCH   │─────── D4 (NES_LATCH)
 │ 4 - DATA    │─────── D5 (NES_DATA)
-│ 5 - VCC     │─────── 5V 或 3.3V
+│ 5 - VCC     │─────── 5V or 3.3V
 └─────────────┘
 ```
 
 ---
 
-## 技术架构
+## Technical Architecture
 
-### 库依赖
+### Library Dependencies
 
-- `Arduino.h` - Arduino 核心库
-- `BleCompositeHID.h` - 蓝牙 HID 复合设备库
-- `XboxGamepadDevice.h` - Xbox 游戏手柄设备库
+- `Arduino.h` - Arduino core library
+- `BleCompositeHID.h` - Bluetooth HID composite device library
+- `XboxGamepadDevice.h` - Xbox gamepad device library
+- `esp_sleep.h` - ESP32 deep sleep library
 
-### NES 控制器协议
+### NES Controller Protocol
 
-NES 控制器使用串行协议通信：
-1. 拉高 **LATCH** 信号（20µs）
-2. 拉低 **LATCH** 信号（10µs）
-3. 连续发送 8 个时钟脉冲，每次脉冲后读取 **DATA** 引脚
-4. 按钮读取顺序：A → B → Select → Start → Up → Down → Left → Right
+NES controller uses serial protocol communication:
+1. Pull **LATCH** signal HIGH (20µs)
+2. Pull **LATCH** signal LOW (10µs)
+3. Send 8 consecutive clock pulses, read **DATA** pin after each pulse
+4. Button reading order: A → B → Select → Start → Up → Down → Left → Right
 
-### 信号滤波算法
+### Signal Filtering Algorithm
 
-采用**多数投票算法**（Majority Voting）消除按钮抖动：
-- 连续采样 7 次（`READ_SAMPLES = 7`）
-- 每个按钮位统计高电平次数
-- 超过 5 次（`MAJORITY_THRESHOLD = 5`）则判定为按下
-- 采样间隔 200µs（`SAMPLE_INTERVAL = 200`）
+Uses **Majority Voting** algorithm to eliminate button bounce:
+- Sample 7 times consecutively (`READ_SAMPLES = 7`)
+- Count HIGH states for each button bit
+- Determine as pressed if count exceeds 5 (`MAJORITY_THRESHOLD = 5`)
+- Sample interval: 200µs (`SAMPLE_INTERVAL = 200`)
 
----
+### Auto Sleep Feature
 
-## 按钮映射
-
-| NES 按钮 | Xbox 按钮 | 功能说明 |
-|----------|-----------|----------|
-| A | XBOX_BUTTON_A | 主攻击键 |
-| B | XBOX_BUTTON_B | 副攻击键 |
-| Select | XBOX_BUTTON_SELECT | 选择键 |
-| Start | XBOX_BUTTON_START | 开始键 |
-| Up | D-Pad North | 方向上 |
-| Down | D-Pad South | 方向下 |
-| Left | D-Pad West | 方向左 |
-| Right | D-Pad East | 方向右 |
-
-### 方向键组合
-
-代码支持斜方向输入：
-- ↑ + → → 右上
-- ↓ + → → 右下
-- ↓ + ← → 左下
-- ↑ + ← → 左上
+- **Sleep timeout**: 5 minutes of no button activity
+- **Sleep mode**: ESP32 deep sleep (consumes ~10µA)
+- **Wake-up**: Timer wakes every 2 seconds to check for button press
+- **Full wake-up**: Any button press triggers full system wake-up
+- **Power saving**: Bluetooth and peripherals are shut down during deep sleep
 
 ---
 
-## 参数配置
+## Button Mapping
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| READ_SAMPLES | 7 | 多数投票采样次数 |
-| MAJORITY_THRESHOLD | 5 | 判定按钮按下的阈值 |
-| SAMPLE_INTERVAL | 200 | 采样间隔（微秒） |
-| SEND_INTERVAL | 50 | 按钮发送间隔（毫秒） |
+| NES Button | Xbox Button | Function |
+|------------|-------------|----------|
+| A | XBOX_BUTTON_A | Main attack button |
+| B | XBOX_BUTTON_B | Secondary attack button |
+| Select | XBOX_BUTTON_SELECT | Select button |
+| Start | XBOX_BUTTON_START | Start button |
+| Up | D-Pad North | Direction Up |
+| Down | D-Pad South | Direction Down |
+| Left | D-Pad West | Direction Left |
+| Right | D-Pad East | Direction Right |
+
+### D-Pad Combinations
+
+Supports diagonal input:
+- ↑ + → → Northeast
+- ↓ + → → Southeast
+- ↓ + ← → Southwest
+- ↑ + ← → Northwest
 
 ---
 
-## 构建和运行
+## Configuration Parameters
 
-### 硬件连接
+| Parameter | Default Value | Description |
+|-----------|---------------|-------------|
+| READ_SAMPLES | 7 | Number of samples for majority voting |
+| MAJORITY_THRESHOLD | 5 | Threshold to determine button press |
+| SAMPLE_INTERVAL | 200 | Sample interval (microseconds) |
+| SEND_INTERVAL | 50 | Button report send interval (milliseconds) |
+| AUTO_SLEEP_TIME_MS | 300000 | Auto sleep timeout (5 minutes, milliseconds) |
+| DEBUG_ENABLED | 0 | Debug output switch (1=enabled, 0=disabled) |
 
-1. 将 NES 控制器的 5 根线缆连接到 ESP32 对应引脚
-2. 确保 GND 共地
-3. VCC 接 5V 或 3.3V（根据 NES 控制器型号）
+---
 
-### 开发环境
+## Build and Run
 
-- **IDE**：Arduino IDE
-- **开发板**：ESP32（需安装 ESP32 核心）
-- **库管理**：通过 Arduino IDE 库管理器安装以下库：
+### Hardware Connection
+
+1. Connect 5 wires from NES controller to corresponding ESP32 pins
+2. Ensure common GND connection
+3. Connect VCC to 5V or 3.3V (depending on NES controller model)
+
+### Development Environment
+
+- **IDE**: Arduino IDE
+- **Board**: ESP32 (requires ESP32 core installation)
+- **Library Manager**: Install the following libraries via Arduino IDE Library Manager:
   - `BleCompositeHID`
   - `XboxGamepadDevice`
 
-### 串口调试
+### Serial Debugging
 
-- **波特率**：115200
-- 启动时输出 "NES Controller Ready!"
-- 可在此查看连接状态
+- **Baud Rate**: 115200
+- Startup outputs "NES Controller Ready!"
+- Debug information can be enabled by setting `DEBUG_ENABLED = 1`
 
 ---
 
-## 程序流程
+## Program Flow
 
-### 初始化流程 (`setup()`)
+### Initialization Flow (`setup()`)
 
-1. 初始化串口调试（115200 baud）
-2. 配置 NES 控制器引脚（CLOCK、LATCH 为输出，DATA 为输入上拉）
-3. 配置 LED 引脚
-4. 创建 Xbox 手柄配置
-5. 初始化蓝牙 HID 复合设备
-6. 开始广播
+1. Initialize serial debug (115200 baud)
+2. Configure NES controller pins (CLOCK, LATCH as output, DATA as input with pull-up)
+3. Configure LED pin
+4. Create Xbox controller configuration
+5. Initialize Bluetooth HID composite device
+6. Start advertising
 
-### 主循环 (`loop()`)
+### Main Loop (`loop()`)
 
 ```
 ┌─────────────────────────────────────┐
-│ 检查蓝牙连接状态                     │
-│   ├─ 未连接：LED 闪烁，等待          │
-│   └─ 已连接：继续                    │
+│ Check sleep timeout                 │
+│   └─ 5 min idle → enter deep sleep  │
 ├─────────────────────────────────────┤
-│ 读取 NES 控制器状态                  │
-│   ├─ 多数投票滤波                   │
-│   └─ 原始读取                       │
+│ Check Bluetooth connection status   │
+│   ├─ Not connected: LED blink       │
+│   └─ Connected: Continue            │
 ├─────────────────────────────────────┤
-│ 检测按钮变化                         │
-│   ├─ 变化且超过发送间隔              │
-│   └─ 发送 Xbox 手柄报告             │
+│ Read NES controller state           │
+│   ├─ Majority voting filter         │
+│   └─ Raw reading                    │
 ├─────────────────────────────────────┤
-│ LED 状态更新                         │
-│   └─ 有按钮按下则亮灯                │
+│ Detect button changes               │
+│   ├─ Changed and interval elapsed   │
+│   └─ Send Xbox gamepad report       │
+├─────────────────────────────────────┤
+│ LED status update                   │
+│   └─ Light on when button pressed   │
 └─────────────────────────────────────┘
 ```
 
 ---
 
-## LED 指示状态
+## LED Status Indicators
 
-| 状态 | LED 行为 | 说明 |
-|------|----------|------|
-| 未连接 | 500ms 闪烁一次 | 等待蓝牙配对 |
-| 已连接 | 按钮按下时亮起 | 正常工作 |
-
----
-
-## 扩展功能
-
-### 可选扩展
-
-1. **Turbo 连发功能**：添加 Turbo A/B 按键支持
-2. **多手柄支持**：扩展支持 2 个 NES 控制器
-3. **配置存储**：使用 EEPROM 保存设置
-4. **自定义映射**：支持按键重映射
+| Status | LED Behavior | Description |
+|--------|--------------|-------------|
+| Not Connected | Blink every 500ms | Waiting for Bluetooth pairing |
+| Connected | Lights on button press | Normal operation |
+| Deep Sleep | OFF | Power saving mode |
 
 ---
 
-## 注意事项
+## Extended Features
 
-- 本项目使用蓝牙 BLE HID，需要配对的设备支持 Bluetooth 4.0+
-- NES 控制器需确认接线顺序，部分国产兼容手柄引脚定义可能不同
-- ESP32 供电需稳定，建议使用独立电源
-- 首次配对时设备显示名称为 "NES Controller"
+### Optional Extensions
+
+1. **Turbo Function**: Add Turbo A/B button support
+2. **Multi-Controller Support**: Support for 2 or more NES controllers
+3. **Configuration Storage**: Use EEPROM to save settings
+4. **Custom Mapping**: Support button remapping
 
 ---
 
-## 文件结构
+## Notes
+
+- This project uses Bluetooth BLE HID, requires devices supporting Bluetooth 4.0+
+- Verify NES controller wiring, as some third-party compatible controllers may have different pin definitions
+- ESP32 power supply should be stable, recommend using independent power source
+- Device name shows as "NES Controller" during first pairing
+- Deep sleep mode significantly reduces power consumption (~10µA vs ~50-100mA active)
+
+---
+
+## File Structure
 
 ```
 sketch_mar4a/
-└── sketch_mar4a.ino    # 主程序文件，包含所有功能代码
+├── sketch_mar4a.ino    # Main program file with all functionality
+├── README.md           # English documentation (this file)
+└── README_zh_CN.md     # Chinese documentation
 ```
+
+---
+
+## License
+
+This project is open source. Feel free to modify and distribute.

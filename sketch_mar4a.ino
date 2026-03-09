@@ -1,13 +1,15 @@
 /*
  * NES Controller Bluetooth Gamepad - Xbox XInput 模式
  * 最终版本 - 兼容 QuickNES 核心
+ * 增加 ESP32 深度睡眠支持
  */
 
 #include <Arduino.h>
 #include <BleCompositeHID.h>
 #include <XboxGamepadDevice.h>
+#include <esp_sleep.h>
 
-// NES控制器引脚
+// NES 控制器引脚
 #define NES_CLOCK  2
 #define NES_LATCH  4
 #define NES_DATA   5
@@ -23,6 +25,25 @@ BleCompositeHID compositeHID("NES Controller", "ESP32", 100);
 #define SAMPLE_INTERVAL 200
 #define SEND_INTERVAL 50
 
+// 自动休眠参数
+#define AUTO_SLEEP_TIME_MS 300000  // 5 分钟无按键自动休眠
+
+// 调试开关
+#define DEBUG_ENABLED 0  // 1=开启调试输出，0=关闭调试输出
+
+// 调试宏定义
+#if DEBUG_ENABLED
+  #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTF(x, ...) Serial.printf(x, ##__VA_ARGS__)
+  #define DEBUG_PRINT_HEX(x) do { Serial.print("0x"); Serial.print(x, HEX); } while(0)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(x, ...)
+  #define DEBUG_PRINT_HEX(x)
+#endif
+
 // 按钮位定义
 #define BTN_A       0x01
 #define BTN_B       0x02
@@ -37,24 +58,87 @@ BleCompositeHID compositeHID("NES Controller", "ESP32", 100);
 uint8_t currentButtons = 0;
 unsigned long lastSendTime = 0;
 
+// 自动休眠状态
+unsigned long lastActivityTime = 0;
+
+// RTC 内存 - 保存唤醒原因
+RTC_DATA_ATTR bool wokeFromSleep = false;
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("NES Controller Ready!");
   
+  DEBUG_PRINTLN("NES Controller Starting...");
+  
+  // 首先初始化 GPIO 引脚（必须在唤醒检测之前）
   pinMode(NES_CLOCK, OUTPUT);
   pinMode(NES_LATCH, OUTPUT);
   pinMode(NES_DATA, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   
+  // 检查唤醒原因
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+    DEBUG_PRINTLN("=== Woke from deep sleep (TIMER) ===");
+    wokeFromSleep = true;
+    
+    // 从睡眠唤醒，快速检测是否有按键
+    uint8_t buttons = readNESMajority();
+    if (buttons == 0) {
+      // 没有按键，继续睡眠
+      DEBUG_PRINTLN("No buttons pressed, going back to sleep...");
+      Serial.flush();
+      delay(100);
+      enterDeepSleep();
+      return;  // 不会执行到这里
+    }
+    
+    // 有按键按下，完全唤醒
+    DEBUG_PRINT("Button detected (");
+    DEBUG_PRINT_HEX(buttons);
+    DEBUG_PRINTLN("), waking up completely!");
+    
+    // 点亮 LED
+    digitalWrite(LED_PIN, HIGH);
+    
+    // 重置按键状态，避免唤醒时的按键导致状态错乱
+    currentButtons = 0;
+  } else {
+    DEBUG_PRINTLN("NES Controller Ready! (Cold boot)");
+    wokeFromSleep = false;
+    currentButtons = 0;
+  }
+  
+  // 初始化休眠状态
+  lastActivityTime = millis();
+  
+  // 初始化蓝牙 HID
   XboxSeriesXControllerDeviceConfiguration* config = new XboxSeriesXControllerDeviceConfiguration();
   BLEHostConfiguration hostConfig = config->getIdealHostConfiguration();
   gamepad = new XboxGamepadDevice(config);
   compositeHID.addDevice(gamepad);
   compositeHID.begin(hostConfig);
+  
+  DEBUG_PRINTLN("Controller initialized, waiting for connection...");
+  
+  // 等待蓝牙设备准备好
+  delay(200);
+  
+  // 发送一个空的手柄报告，确保手柄状态清零
+  sendButtons(0);
+  
+  Serial.flush();
+  delay(300);
 }
 
 void loop() {
+  // 检查是否需要进入休眠
+  unsigned long idleTime = millis() - lastActivityTime;
+  if (idleTime >= AUTO_SLEEP_TIME_MS) {
+    enterDeepSleep();
+  }
+  
   if (!compositeHID.isConnected()) {
     digitalWrite(LED_PIN, (millis() / 500) % 2);
     delay(10);
@@ -62,6 +146,11 @@ void loop() {
   }
   
   uint8_t result = readNESMajority();
+  
+  // 更新最后活动时间
+  if (result != 0) {
+    lastActivityTime = millis();
+  }
   
   unsigned long now = millis();
   if (result != currentButtons && (now - lastSendTime >= SEND_INTERVAL)) {
@@ -119,6 +208,39 @@ uint8_t readNESRaw() {
   }
   
   return result;
+}
+
+// 进入深度睡眠模式
+void enterDeepSleep() {
+  DEBUG_PRINTLN("=== Entering deep sleep (no activity for 5 min) ===");
+  DEBUG_PRINTLN("Shutting down peripherals...");
+  
+  // 熄灭 LED
+  digitalWrite(LED_PIN, LOW);
+  
+  DEBUG_PRINTLN("Deinitializing Bluetooth...");
+  // esp_deep_sleep_start() 会自动关闭所有外设包括蓝牙
+  
+  DEBUG_PRINTLN("Configuring wake-up sources...");
+  
+  // 简化方案：使用 timer 周期性唤醒检测
+  // 每 2 秒唤醒一次，检测是否有按键，没有则继续睡眠
+  
+  DEBUG_PRINTLN("Using timer wake-up (2 second interval)...");
+  
+  // 配置 2 秒定时器唤醒
+  esp_sleep_enable_timer_wakeup(2000000);  // 2000000 微秒 = 2 秒
+  
+  DEBUG_PRINTLN("All peripherals off. Entering deep sleep...");
+  DEBUG_PRINTLN("Will wake every 2s to check for button press");
+  Serial.flush();
+  
+  delay(100);
+  
+  // 进入深度睡眠 - 这会关闭 CPU、蓝牙、WiFi 等所有外设
+  esp_deep_sleep_start();
+  
+  // 程序不会执行到这里 - ESP32 会重启
 }
 
 void sendButtons(uint8_t buttons) {
