@@ -210,14 +210,19 @@ Supports diagonal input:
 
 ---
 
-## File Structure
+## Code Branches
 
-```
-sketch_mar4a/
-├── sketch_mar4a.ino    # Main program file with all functionality
-├── README.md           # English documentation (this file)
-└── README_zh_CN.md     # Chinese documentation
-```
+### Branch Structure
+
+| Branch | Description | Features |
+|--------|-------------|----------|
+| `stable` | Stable version with core functionality | Basic NES controller support, Bluetooth HID Xbox gamepad, auto sleep, re-pairing, LED indicators |
+| `beta` | Beta version with experimental features | All stable features + direction key anti-interference (prevents Turbo interference) |
+
+### Branch Usage
+
+- **`stable` branch**: Recommended for most users, provides reliable basic functionality
+- **`beta` branch**: For users experiencing direction key interference issues, includes anti-interference algorithm
 
 ---
 
