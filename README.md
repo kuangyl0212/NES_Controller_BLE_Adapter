@@ -13,6 +13,7 @@ This project is an **ESP32-based NES (Nintendo Entertainment System) controller 
 - **Signal Filtering**: Uses majority voting algorithm to eliminate button bounce and improve stability
 - **LED Status Indicator**: Shows connection status and button press states
 - **Auto Sleep Mode**: Automatically enters deep sleep after 5 minutes of inactivity to save power (press any button to wake up)
+- **Re-pairing**: Long press Select button for 5 seconds to delete pairing info and re-advertise (no reboot required)
 
 ---
 

@@ -8,6 +8,7 @@
 #include <BleCompositeHID.h>
 #include <XboxGamepadDevice.h>
 #include <esp_sleep.h>
+#include <NimBLEDevice.h>
 
 // NES 控制器引脚
 #define NES_CLOCK  2
@@ -27,6 +28,9 @@ BleCompositeHID compositeHID("NES Controller", "ESP32", 100);
 
 // 自动休眠参数
 #define AUTO_SLEEP_TIME_MS 300000  // 5 分钟无按键自动休眠
+
+// 长按 Select 键重新配对参数
+#define SELECT_HOLD_TIME_MS 5000  // 长按 Select 键 5 秒触发重新配对
 
 // 调试开关
 #define DEBUG_ENABLED 0  // 1=开启调试输出，0=关闭调试输出
@@ -69,10 +73,17 @@ uint8_t lastDirection = 0;  // 记录上一次的方向键状态
 // RTC 内存 - 保存唤醒原因
 RTC_DATA_ATTR bool wokeFromSleep = false;
 
+// Select 键长按检测
+unsigned long selectPressStartTime = 0;
+bool selectPressed = false;
+
 void setup() {
   Serial.begin(115200);
   
   DEBUG_PRINTLN("NES Controller Starting...");
+  
+  // 初始化随机数生成器
+  randomSeed(micros());
   
   // 首先初始化 GPIO 引脚（必须在唤醒检测之前）
   pinMode(NES_CLOCK, OUTPUT);
@@ -144,6 +155,9 @@ void loop() {
     enterDeepSleep();
   }
   
+  // 检测 Select 键长按（在所有状态下都检测）
+  checkSelectLongPress();
+  
   if (!compositeHID.isConnected()) {
     digitalWrite(LED_PIN, (millis() / 500) % 2);
     delay(10);
@@ -192,6 +206,97 @@ void loop() {
   
   digitalWrite(LED_PIN, currentButtons ? HIGH : LOW);
   delay(5);
+}
+
+// 检测 Select 键长按
+void checkSelectLongPress() {
+  uint8_t buttons = readNESMajority();
+  
+  if (buttons & BTN_SELECT) {
+    // Select 键按下
+    if (!selectPressed) {
+      selectPressed = true;
+      selectPressStartTime = millis();
+      DEBUG_PRINTLN("Select key pressed, waiting...");
+    }
+    
+    // 检查是否长按超过 5 秒
+    if (millis() - selectPressStartTime >= SELECT_HOLD_TIME_MS) {
+      // 长按 Select 键 5 秒，触发重新配对
+      DEBUG_PRINTLN("Select key held for 5 seconds!");
+      startRebond();
+    }
+  } else {
+    // Select 键释放
+    selectPressed = false;
+  }
+}
+
+// 重新配对蓝牙
+void startRebond() {
+  DEBUG_PRINTLN("=== Starting rebond process ===");
+  Serial.println("Starting rebond process...");
+  
+  // 1. 断开所有已连接的客户端
+  NimBLEServer* pServer = NimBLEDevice::getServer();
+  if (pServer != nullptr) {
+    std::vector<uint16_t> peerDevices = pServer->getPeerDevices();
+    DEBUG_PRINTF("Found %d connected clients\n", peerDevices.size());
+    for (uint16_t connHandle : peerDevices) {
+      DEBUG_PRINTF("Disconnecting client handle: %d\n", connHandle);
+      pServer->disconnect(connHandle);
+    }
+    delay(500);
+  }
+  
+  // 2. 删除所有配对信息
+  Serial.println("Deleting all bonds...");
+  bool result = NimBLEDevice::deleteAllBonds();
+  Serial.printf("Delete bonds: %s\n", result ? "SUCCESS" : "FAILED");
+  
+  // 3. 停止广播并等待
+  Serial.println("Stopping advertising...");
+  if (pServer != nullptr) {
+    pServer->stopAdvertising();
+  }
+  delay(500);
+  
+  // 4. 等待蓝牙栈完全关闭
+  Serial.println("Waiting for BLE stack to stop...");
+  delay(1000);
+  
+  // 5. 生成新的随机 MAC 地址
+  uint8_t newMAC[6];
+  newMAC[0] = 0xC0 | (random(0, 64));  // 静态随机地址
+  newMAC[1] = random(0, 256);
+  newMAC[2] = random(0, 256);
+  newMAC[3] = random(0, 256);
+  newMAC[4] = random(0, 256);
+  newMAC[5] = random(0, 256);
+  
+  Serial.printf("New MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
+                newMAC[0], newMAC[1], newMAC[2], 
+                newMAC[3], newMAC[4], newMAC[5]);
+  
+  // 6. 设置新的 MAC 地址
+  NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+  NimBLEDevice::setOwnAddr(newMAC);
+  
+  // 7. 等待 MAC 地址生效
+  delay(500);
+  
+  // 8. 重新开始广播
+  Serial.println("Starting advertising with new MAC...");
+  if (pServer != nullptr) {
+    pServer->start();
+    pServer->startAdvertising();
+  }
+  
+  Serial.println("Rebond complete! Device is now discoverable as a new device.");
+  Serial.println("Please search for 'NES Controller' in your device's Bluetooth settings.");
+  
+  // 重置长按状态
+  selectPressed = false;
 }
 
 uint8_t readNESMajority() {
