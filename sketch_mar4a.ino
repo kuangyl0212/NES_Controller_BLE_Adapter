@@ -21,8 +21,9 @@ XboxGamepadDevice* gamepad;
 BleCompositeHID compositeHID("NES Controller", "ESP32", 100);
 
 // 参数
-#define READ_SAMPLES 7
-#define MAJORITY_THRESHOLD 5
+#define READ_SAMPLES 9
+#define SKIP_SAMPLES 2
+#define MAJORITY_THRESHOLD 4
 #define SAMPLE_INTERVAL 200
 #define SEND_INTERVAL 50
 
@@ -60,15 +61,23 @@ BleCompositeHID compositeHID("NES Controller", "ESP32", 100);
 
 // 状态
 uint8_t currentButtons = 0;
+uint8_t lastSentButtons = 0;
 unsigned long lastSendTime = 0;
 
 // 自动休眠状态
 unsigned long lastActivityTime = 0;
 
 // 方向键保护机制 - 防止 Turbo 干扰导致方向键误释放
-#define DIRECTION_RELEASE_THRESHOLD 2  // 需要连续检测到释放才接受
-uint8_t directionReleaseCounter = 0;
-uint8_t lastDirection = 0;  // 记录上一次的方向键状态
+#define DIRECTION_HOLD_CYCLES 3
+uint8_t directionHoldCounter = 0;
+uint8_t confirmedDirection = 0;
+
+uint8_t prevDirectionState = 0;
+
+#define DIR_HISTORY_SIZE 5
+uint8_t dirHistory[DIR_HISTORY_SIZE] = {0};
+uint8_t dirHistoryIndex = 0;
+uint8_t dirHistoryFilled = 0;
 
 // RTC 内存 - 保存唤醒原因
 RTC_DATA_ATTR bool wokeFromSleep = false;
@@ -142,6 +151,7 @@ void setup() {
   delay(200);
   
   // 发送一个空的手柄报告，确保手柄状态清零
+  lastSentButtons = 0xFF;
   sendButtons(0);
   
   Serial.flush();
@@ -166,27 +176,80 @@ void loop() {
   
   uint8_t result = readNESMajority();
   
-  // 应用方向键保护机制 - 只延迟释放，不延迟按下
+  uint8_t currentDirection = result & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
+  uint8_t actionButtons = result & (BTN_A | BTN_B);
+  
+  if (actionButtons != 0 && prevDirectionState != 0) {
+    if (currentDirection == 0 && prevDirectionState != 0) {
+      DEBUG_PRINTF("DIRECTION_GLITCH: dir was ");
+      DEBUG_PRINT_HEX(prevDirectionState);
+      DEBUG_PRINT(" now 0, action=");
+      DEBUG_PRINT_HEX(actionButtons);
+      DEBUG_PRINTLN();
+    } else if (currentDirection != 0 && currentDirection != prevDirectionState && prevDirectionState != 0) {
+      DEBUG_PRINTF("DIRECTION_SHIFT: dir was ");
+      DEBUG_PRINT_HEX(prevDirectionState);
+      DEBUG_PRINT(" now ");
+      DEBUG_PRINT_HEX(currentDirection);
+      DEBUG_PRINT(", action=");
+      DEBUG_PRINT_HEX(actionButtons);
+      DEBUG_PRINTLN();
+    }
+  }
+  
+  if (currentDirection != 0) {
+    prevDirectionState = currentDirection;
+  } else if (actionButtons == 0) {
+    prevDirectionState = 0;
+  }
+  
+  dirHistory[dirHistoryIndex] = currentDirection;
+  dirHistoryIndex = (dirHistoryIndex + 1) % DIR_HISTORY_SIZE;
+  if (dirHistoryFilled < DIR_HISTORY_SIZE) dirHistoryFilled++;
+  
+  if (dirHistoryFilled >= DIR_HISTORY_SIZE && actionButtons != 0) {
+    uint8_t changes = 0;
+    for (int i = 1; i < DIR_HISTORY_SIZE; i++) {
+      if (dirHistory[i] != dirHistory[i-1]) changes++;
+    }
+    if (dirHistory[0] != dirHistory[DIR_HISTORY_SIZE-1]) changes++;
+    
+    if (changes >= 3) {
+      DEBUG_PRINTF("DIR_UNSTABLE: changes=%d history=[", changes);
+      for (int i = 0; i < DIR_HISTORY_SIZE; i++) {
+        if (i > 0) DEBUG_PRINT(",");
+        DEBUG_PRINT_HEX(dirHistory[i]);
+      }
+      DEBUG_PRINT("] action=");
+      DEBUG_PRINT_HEX(actionButtons);
+      DEBUG_PRINTLN();
+    }
+  }
+  
   uint8_t direction = result & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
   uint8_t nonDirection = result & ~(BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
-  
-  if (direction != 0) {
-    // 有方向键按下，立即重置计数器并更新方向
-    directionReleaseCounter = 0;
-    lastDirection = direction;
-  } else if (lastDirection != 0) {
-    // 方向键看似释放，需要连续检测到才接受
-    directionReleaseCounter++;
-    if (directionReleaseCounter >= DIRECTION_RELEASE_THRESHOLD) {
-      // 真正释放
-      lastDirection = 0;
-      directionReleaseCounter = 0;
+  uint8_t actionActive = nonDirection & (BTN_A | BTN_B);
+
+  if (direction == confirmedDirection) {
+    directionHoldCounter = 0;
+  } else if (direction != 0 && confirmedDirection == 0) {
+    confirmedDirection = direction;
+    directionHoldCounter = 0;
+  } else if (actionActive && confirmedDirection != 0) {
+    directionHoldCounter++;
+    if (directionHoldCounter >= DIRECTION_HOLD_CYCLES) {
+      confirmedDirection = direction;
+      directionHoldCounter = 0;
     }
-    // 否则保持上一次的方向
-    direction = lastDirection;
+    direction = confirmedDirection;
   } else {
-    // 本来就是释放状态
-    direction = 0;
+    confirmedDirection = direction;
+    directionHoldCounter = 0;
+  }
+
+  if (direction == 0 && confirmedDirection != 0 && !actionActive) {
+    confirmedDirection = 0;
+    directionHoldCounter = 0;
   }
   
   // 合并方向键和非方向键
@@ -299,14 +362,35 @@ void startRebond() {
   selectPressed = false;
 }
 
+void printSampleDiagnostics(uint8_t* rawSamples, uint8_t* voteCount, uint8_t result) {
+  DEBUG_PRINT("RAW:[");
+  for (int i = 0; i < READ_SAMPLES; i++) {
+    if (i > 0) DEBUG_PRINT(",");
+    DEBUG_PRINT_HEX(rawSamples[i]);
+  }
+  DEBUG_PRINT("] ");
+
+  DEBUG_PRINTF("SKIP:%d VOTES: A:%d B:%d Sel:%d Sta:%d U:%d D:%d L:%d R:%d ", SKIP_SAMPLES,
+    voteCount[0], voteCount[1], voteCount[2], voteCount[3],
+    voteCount[4], voteCount[5], voteCount[6], voteCount[7]);
+  
+  DEBUG_PRINT("=> ");
+  DEBUG_PRINT_HEX(result);
+  DEBUG_PRINTLN();
+}
+
 uint8_t readNESMajority() {
   uint8_t voteCount[8] = {0};
+  uint8_t rawSamples[READ_SAMPLES];
   
   for (int sample = 0; sample < READ_SAMPLES; sample++) {
     uint8_t raw = readNESRaw();
-    for (int bit = 0; bit < 8; bit++) {
-      if (raw & (1 << bit)) {
-        voteCount[bit]++;
+    rawSamples[sample] = raw;
+    if (sample >= SKIP_SAMPLES) {
+      for (int bit = 0; bit < 8; bit++) {
+        if (raw & (1 << bit)) {
+          voteCount[bit]++;
+        }
       }
     }
     delayMicroseconds(SAMPLE_INTERVAL);
@@ -317,6 +401,12 @@ uint8_t readNESMajority() {
     if (voteCount[bit] >= MAJORITY_THRESHOLD) {
       result |= (1 << bit);
     }
+  }
+  
+  static uint8_t lastDiagnosticResult = 0;
+  if (result != lastDiagnosticResult) {
+    printSampleDiagnostics(rawSamples, voteCount, result);
+    lastDiagnosticResult = result;
   }
   
   return result;
@@ -380,34 +470,43 @@ void enterDeepSleep() {
 }
 
 void sendButtons(uint8_t buttons) {
-  bool a = buttons & BTN_A;
-  bool b = buttons & BTN_B;
-  bool sel = buttons & BTN_SELECT;
-  bool start = buttons & BTN_START;
-  bool up = buttons & BTN_UP;
-  bool down = buttons & BTN_DOWN;
-  bool left = buttons & BTN_LEFT;
-  bool right = buttons & BTN_RIGHT;
+  uint8_t changed = buttons ^ lastSentButtons;
   
-  gamepad->release(XBOX_BUTTON_A);
-  gamepad->release(XBOX_BUTTON_B);
-  gamepad->release(XBOX_BUTTON_SELECT);
-  gamepad->release(XBOX_BUTTON_START);
-  gamepad->releaseDPad();
+  if (changed & BTN_A) {
+    if (buttons & BTN_A) gamepad->press(XBOX_BUTTON_A);
+    else gamepad->release(XBOX_BUTTON_A);
+  }
+  if (changed & BTN_B) {
+    if (buttons & BTN_B) gamepad->press(XBOX_BUTTON_B);
+    else gamepad->release(XBOX_BUTTON_B);
+  }
+  if (changed & BTN_SELECT) {
+    if (buttons & BTN_SELECT) gamepad->press(XBOX_BUTTON_SELECT);
+    else gamepad->release(XBOX_BUTTON_SELECT);
+  }
+  if (changed & BTN_START) {
+    if (buttons & BTN_START) gamepad->press(XBOX_BUTTON_START);
+    else gamepad->release(XBOX_BUTTON_START);
+  }
   
-  if (a) gamepad->press(XBOX_BUTTON_A);
-  if (b) gamepad->press(XBOX_BUTTON_B);
-  if (sel) gamepad->press(XBOX_BUTTON_SELECT);
-  if (start) gamepad->press(XBOX_BUTTON_START);
-  
-  if (up && right) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::NORTH | XboxDpadFlags::EAST));
-  else if (down && right) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::SOUTH | XboxDpadFlags::EAST));
-  else if (down && left) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::SOUTH | XboxDpadFlags::WEST));
-  else if (up && left) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::NORTH | XboxDpadFlags::WEST));
-  else if (up) gamepad->pressDPadDirectionFlag(XboxDpadFlags::NORTH);
-  else if (down) gamepad->pressDPadDirectionFlag(XboxDpadFlags::SOUTH);
-  else if (left) gamepad->pressDPadDirectionFlag(XboxDpadFlags::WEST);
-  else if (right) gamepad->pressDPadDirectionFlag(XboxDpadFlags::EAST);
+  uint8_t newDir = buttons & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
+  uint8_t oldDir = lastSentButtons & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
+  if (newDir != oldDir) {
+    gamepad->releaseDPad();
+    bool up = buttons & BTN_UP;
+    bool down = buttons & BTN_DOWN;
+    bool left = buttons & BTN_LEFT;
+    bool right = buttons & BTN_RIGHT;
+    if (up && right) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::NORTH | XboxDpadFlags::EAST));
+    else if (down && right) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::SOUTH | XboxDpadFlags::EAST));
+    else if (down && left) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::SOUTH | XboxDpadFlags::WEST));
+    else if (up && left) gamepad->pressDPadDirectionFlag((XboxDpadFlags)(XboxDpadFlags::NORTH | XboxDpadFlags::WEST));
+    else if (up) gamepad->pressDPadDirectionFlag(XboxDpadFlags::NORTH);
+    else if (down) gamepad->pressDPadDirectionFlag(XboxDpadFlags::SOUTH);
+    else if (left) gamepad->pressDPadDirectionFlag(XboxDpadFlags::WEST);
+    else if (right) gamepad->pressDPadDirectionFlag(XboxDpadFlags::EAST);
+  }
   
   gamepad->sendGamepadReport();
+  lastSentButtons = buttons;
 }
